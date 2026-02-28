@@ -1,0 +1,107 @@
+import pandas as pd
+import numpy as np
+import yfinance as yf
+import requests, zipfile, io
+from datetime import datetime, timedelta
+
+# --------------------------------------------------
+# 1. FETCH ALL NSE SYMBOLS
+# --------------------------------------------------
+def fetch_nse_symbols():
+    try:
+        csv_file = r"C:\Z_Srinu\ST_Python\Symbols_List.csv"   # <-- your file path
+        symbols_df = pd.read_csv(csv_file)
+        stocks = symbols_df["Symbol"].dropna().unique().tolist()
+        return [s if s.endswith('.NS') else s + '.NS' for s in stocks]
+    except:
+        raise Exception("Failed to fetch NSE symbols")
+
+stocks = fetch_nse_symbols()
+print(f"Total NSE stocks: {len(stocks)}")
+
+# --------------------------------------------------
+# 2. DOWNLOAD DATA
+# --------------------------------------------------
+data = yf.download(
+    stocks,
+    period="18mo",
+    interval="1d",
+    auto_adjust=True,
+    group_by="ticker",
+    threads=True
+)
+
+# --------------------------------------------------
+# 3. CALCULATION FUNCTION
+# --------------------------------------------------
+def analyze_stock(symbol):
+    try:
+        df = data[symbol].dropna()
+
+        if len(df) < 252:
+            return None
+
+        close = df["Close"]
+        volume = df["Volume"]
+
+        # RS CALCULATION
+        r3  = (close.iloc[-1] / close.iloc[-63])  - 1
+        r6  = (close.iloc[-1] / close.iloc[-126]) - 1
+        r9  = (close.iloc[-1] / close.iloc[-189]) - 1
+        r12 = (close.iloc[-1] / close.iloc[-252]) - 1
+        rs_raw = (0.4*r3 + 0.2*r6 + 0.2*r9 + 0.2*r12)
+
+        # 50 EMA
+        ema50 = close.ewm(span=50).mean().iloc[-1]
+
+        # Volume Expansion
+        vol_avg20 = volume.rolling(20).mean().iloc[-1]
+        vol_today = volume.iloc[-1]
+        vol_expansion = vol_today > 1.5 * vol_avg20
+
+        return rs_raw, ema50, vol_expansion, close.iloc[-1]
+
+    except:
+        return None
+
+# --------------------------------------------------
+# 4. BUILD DATASET
+# --------------------------------------------------
+rows = []
+
+for s in stocks:
+    result = analyze_stock(s)
+    if result:
+        rs_raw, ema50, vol_exp, price = result
+        rows.append([s, rs_raw, ema50, vol_exp, price])
+
+df = pd.DataFrame(rows, columns=[
+    "Symbol", "RS_Raw", "EMA50", "Volume_Expansion", "Close"
+])
+
+# --------------------------------------------------
+# 5. RS RATING
+# --------------------------------------------------
+df["RS_Rating"] = (
+    df["RS_Raw"]
+    .rank(pct=True)
+    .apply(lambda x: int(x * 99))
+)
+
+# --------------------------------------------------
+# 6. APPLY CONDITIONS
+# --------------------------------------------------
+df_filtered = df[
+    (df["RS_Rating"] >= 70) &
+    (df["Close"] > df["EMA50"]) &
+    (df["Volume_Expansion"] == True)
+]
+
+# --------------------------------------------------
+# 7. SAVE OUTPUT
+# --------------------------------------------------
+df_filtered = df_filtered.sort_values("RS_Rating", ascending=False)
+df_filtered.to_csv("NSE_RS90_EMA50_Volume15Feb26.csv", index=False)
+
+print("Scanner completed")
+print(df_filtered.head(20))
